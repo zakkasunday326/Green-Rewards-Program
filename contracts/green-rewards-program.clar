@@ -8,8 +8,11 @@
 (define-constant err-action-not-found (err u106))
 (define-constant err-reward-not-found (err u107))
 (define-constant err-insufficient-points (err u108))
+(define-constant err-invalid-position (err u109))
+(define-constant err-leaderboard-full (err u110))
 
 (define-data-var total-users uint u0)
+(define-data-var leaderboard-size uint u10)
 (define-data-var total-actions uint u0)
 (define-data-var total-rewards uint u0)
 (define-data-var contract-active bool true)
@@ -62,6 +65,37 @@
   {
     points-spent: uint,
     redemption-count: uint
+  }
+)
+
+(define-map points-leaderboard
+  { position: uint }
+  {
+    user: principal,
+    points: uint
+  }
+)
+
+(define-map actions-leaderboard
+  { position: uint }
+  {
+    user: principal,
+    actions-count: uint
+  }
+)
+
+(define-map category-leaders
+  { category: (string-ascii 32) }
+  {
+    user: principal,
+    category-points: uint
+  }
+)
+
+(define-map user-category-points
+  { user: principal, category: (string-ascii 32) }
+  {
+    points: uint
   }
 )
 
@@ -157,6 +191,9 @@
         times-completed: (+ (get times-completed action-data) u1)
       }
     )
+    
+    (update-user-category-points user (get category action-data) points-to-earn)
+    (update-category-leader (get category action-data) user)
     
     (ok points-to-earn)
   )
@@ -330,4 +367,82 @@
 
 (define-read-only (is-user-registered (user principal))
   (is-some (map-get? users { user: user }))
+)
+
+(define-private (update-user-category-points (user principal) (category (string-ascii 32)) (points uint))
+  (let
+    (
+      (current-points (default-to u0 (get points (map-get? user-category-points { user: user, category: category }))))
+    )
+    (map-set user-category-points
+      { user: user, category: category }
+      { points: (+ current-points points) }
+    )
+  )
+)
+
+(define-public (update-leaderboard-entry (position uint) (user principal) (points uint) (actions uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= position (var-get leaderboard-size)) err-invalid-position)
+    
+    (map-set points-leaderboard
+      { position: position }
+      { user: user, points: points }
+    )
+    
+    (map-set actions-leaderboard
+      { position: position }
+      { user: user, actions-count: actions }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-private (update-category-leader (category (string-ascii 32)) (user principal))
+  (let
+    (
+      (user-cat-points (default-to u0 (get points (map-get? user-category-points { user: user, category: category }))))
+      (current-leader (map-get? category-leaders { category: category }))
+    )
+    (match current-leader
+      leader-data
+        (if (> user-cat-points (get category-points leader-data))
+          (map-set category-leaders
+            { category: category }
+            { user: user, category-points: user-cat-points }
+          )
+          true
+        )
+      (map-set category-leaders
+        { category: category }
+        { user: user, category-points: user-cat-points }
+      )
+    )
+  )
+)
+
+(define-read-only (get-points-leaderboard-entry (position uint))
+  (map-get? points-leaderboard { position: position })
+)
+
+(define-read-only (get-actions-leaderboard-entry (position uint))
+  (map-get? actions-leaderboard { position: position })
+)
+
+(define-read-only (get-category-leader (category (string-ascii 32)))
+  (map-get? category-leaders { category: category })
+)
+
+(define-read-only (get-user-category-points (user principal) (category (string-ascii 32)))
+  (map-get? user-category-points { user: user, category: category })
+)
+
+(define-read-only (get-leaderboard-stats)
+  {
+    leaderboard-size: (var-get leaderboard-size),
+    points-leader: (map-get? points-leaderboard { position: u1 }),
+    actions-leader: (map-get? actions-leaderboard { position: u1 })
+  }
 )
