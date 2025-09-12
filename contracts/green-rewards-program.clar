@@ -10,12 +10,17 @@
 (define-constant err-insufficient-points (err u108))
 (define-constant err-invalid-position (err u109))
 (define-constant err-leaderboard-full (err u110))
+(define-constant err-streak-not-found (err u111))
+(define-constant err-invalid-day (err u112))
 
 (define-data-var total-users uint u0)
+(define-data-var streak-bonus-multiplier uint u2)
+(define-data-var max-streak-bonus uint u50)
 (define-data-var leaderboard-size uint u10)
 (define-data-var total-actions uint u0)
 (define-data-var total-rewards uint u0)
 (define-data-var contract-active bool true)
+(define-data-var current-day uint u1)
 
 (define-map users
   { user: principal }
@@ -99,6 +104,34 @@
   }
 )
 
+(define-map user-streaks
+  { user: principal }
+  {
+    current-streak: uint,
+    best-streak: uint,
+    last-action-day: uint,
+    total-streak-points: uint,
+    streak-milestones: uint
+  }
+)
+
+(define-map streak-milestones
+  { milestone: uint }
+  {
+    days-required: uint,
+    bonus-points: uint,
+    milestone-name: (string-ascii 32)
+  }
+)
+
+(define-map daily-action-tracker
+  { user: principal, day: uint }
+  {
+    actions-completed: uint,
+    points-earned: uint
+  }
+)
+
 (define-public (register-user)
   (let
     (
@@ -115,6 +148,17 @@
         total-redeemed: u0,
         actions-completed: u0,
         registration-height: u0
+      }
+    )
+    
+    (map-set user-streaks
+      { user: user }
+      {
+        current-streak: u0,
+        best-streak: u0,
+        last-action-day: u0,
+        total-streak-points: u0,
+        streak-milestones: u0
       }
     )
     
@@ -195,7 +239,31 @@
     (update-user-category-points user (get category action-data) points-to-earn)
     (update-category-leader (get category action-data) user)
     
-    (ok points-to-earn)
+    (let
+      (
+        (today (get-current-day))
+        (streak-bonus (calculate-streak-bonus user today))
+        (total-points (+ points-to-earn streak-bonus))
+      )
+      (update-user-streak user today)
+      (update-daily-tracker user today points-to-earn)
+      
+      (if (> streak-bonus u0)
+        (map-set users
+          { user: user }
+          {
+            points: (+ (- (get points user-data) points-to-earn) total-points),
+            total-earned: (+ (- (get total-earned user-data) points-to-earn) total-points),
+            total-redeemed: (get total-redeemed user-data),
+            actions-completed: (get actions-completed user-data),
+            registration-height: (get registration-height user-data)
+          }
+        )
+        true
+      )
+      
+      (ok total-points)
+    )
   )
 )
 
@@ -444,5 +512,204 @@
     leaderboard-size: (var-get leaderboard-size),
     points-leader: (map-get? points-leaderboard { position: u1 }),
     actions-leader: (map-get? actions-leaderboard { position: u1 })
+  }
+)
+
+(define-private (get-current-day)
+  (var-get current-day)
+)
+
+(define-public (advance-day)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set current-day (+ (var-get current-day) u1))
+    (ok (var-get current-day))
+  )
+)
+
+(define-private (calculate-streak-bonus (user principal) (day uint))
+  (let
+    (
+      (streak-data (map-get? user-streaks { user: user }))
+    )
+    (match streak-data
+      user-streak
+        (let
+          (
+            (current-streak (get current-streak user-streak))
+            (base-multiplier (var-get streak-bonus-multiplier))
+            (max-bonus (var-get max-streak-bonus))
+          )
+          (if (>= current-streak u1)
+            (if (< (* current-streak base-multiplier) max-bonus)
+              (* current-streak base-multiplier)
+              max-bonus
+            )
+            u0
+          )
+        )
+      u0
+    )
+  )
+)
+
+(define-private (update-user-streak (user principal) (day uint))
+  (let
+    (
+      (streak-data (default-to 
+        { current-streak: u0, best-streak: u0, last-action-day: u0, total-streak-points: u0, streak-milestones: u0 }
+        (map-get? user-streaks { user: user })
+      ))
+      (last-day (get last-action-day streak-data))
+      (current-streak (get current-streak streak-data))
+      (best-streak (get best-streak streak-data))
+    )
+    (let
+      (
+        (new-streak 
+          (if (is-eq (+ last-day u1) day)
+            (+ current-streak u1)
+            (if (is-eq last-day day)
+              current-streak
+              u1
+            )
+          )
+        )
+        (new-best (if (> new-streak best-streak) new-streak best-streak))
+      )
+      (map-set user-streaks
+        { user: user }
+        {
+          current-streak: new-streak,
+          best-streak: new-best,
+          last-action-day: day,
+          total-streak-points: (get total-streak-points streak-data),
+          streak-milestones: (get streak-milestones streak-data)
+        }
+      )
+      (check-and-award-milestone user new-streak)
+    )
+  )
+)
+
+(define-private (update-daily-tracker (user principal) (day uint) (points uint))
+  (let
+    (
+      (daily-data (default-to
+        { actions-completed: u0, points-earned: u0 }
+        (map-get? daily-action-tracker { user: user, day: day })
+      ))
+    )
+    (map-set daily-action-tracker
+      { user: user, day: day }
+      {
+        actions-completed: (+ (get actions-completed daily-data) u1),
+        points-earned: (+ (get points-earned daily-data) points)
+      }
+    )
+  )
+)
+
+(define-private (check-and-award-milestone (user principal) (streak uint))
+  (let
+    (
+      (milestone-5 (map-get? streak-milestones { milestone: u1 }))
+      (milestone-10 (map-get? streak-milestones { milestone: u2 }))
+      (milestone-30 (map-get? streak-milestones { milestone: u3 }))
+      (user-streak-data (unwrap-panic (map-get? user-streaks { user: user })))
+    )
+    (if (and (>= streak u5) (< (get best-streak user-streak-data) u5))
+      (award-milestone-bonus user u1)
+      (if (and (>= streak u10) (< (get best-streak user-streak-data) u10))
+        (award-milestone-bonus user u2)
+        (if (and (>= streak u30) (< (get best-streak user-streak-data) u30))
+          (award-milestone-bonus user u3)
+          true
+        )
+      )
+    )
+  )
+)
+
+(define-private (award-milestone-bonus (user principal) (milestone-id uint))
+  (let
+    (
+      (milestone-data (map-get? streak-milestones { milestone: milestone-id }))
+      (user-data (unwrap-panic (map-get? users { user: user })))
+      (streak-data (unwrap-panic (map-get? user-streaks { user: user })))
+    )
+    (match milestone-data
+      milestone
+        (let
+          (
+            (bonus-points (get bonus-points milestone))
+          )
+          (map-set users
+            { user: user }
+            {
+              points: (+ (get points user-data) bonus-points),
+              total-earned: (+ (get total-earned user-data) bonus-points),
+              total-redeemed: (get total-redeemed user-data),
+              actions-completed: (get actions-completed user-data),
+              registration-height: (get registration-height user-data)
+            }
+          )
+          (map-set user-streaks
+            { user: user }
+            {
+              current-streak: (get current-streak streak-data),
+              best-streak: (get best-streak streak-data),
+              last-action-day: (get last-action-day streak-data),
+              total-streak-points: (+ (get total-streak-points streak-data) bonus-points),
+              streak-milestones: (+ (get streak-milestones streak-data) u1)
+            }
+          )
+        )
+      true
+    )
+  )
+)
+
+(define-public (setup-streak-milestones)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    (map-set streak-milestones
+      { milestone: u1 }
+      { days-required: u5, bonus-points: u25, milestone-name: "Week Warrior" }
+    )
+    
+    (map-set streak-milestones
+      { milestone: u2 }
+      { days-required: u10, bonus-points: u75, milestone-name: "Consistency Champion" }
+    )
+    
+    (map-set streak-milestones
+      { milestone: u3 }
+      { days-required: u30, bonus-points: u200, milestone-name: "Eco Legend" }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-read-only (get-user-streak (user principal))
+  (map-get? user-streaks { user: user })
+)
+
+(define-read-only (get-daily-actions (user principal) (day uint))
+  (map-get? daily-action-tracker { user: user, day: day })
+)
+
+(define-read-only (get-streak-milestone (milestone-id uint))
+  (map-get? streak-milestones { milestone: milestone-id })
+)
+
+(define-read-only (get-streak-stats)
+  {
+    total-users: (var-get total-users),
+    streak-multiplier: (var-get streak-bonus-multiplier),
+    max-streak-bonus: (var-get max-streak-bonus),
+    current-day: (get-current-day)
   }
 )
