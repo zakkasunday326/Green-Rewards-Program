@@ -12,6 +12,10 @@
 (define-constant err-leaderboard-full (err u110))
 (define-constant err-streak-not-found (err u111))
 (define-constant err-invalid-day (err u112))
+(define-constant err-self-referral (err u113))
+(define-constant err-already-referred (err u114))
+(define-constant err-invalid-referrer (err u115))
+(define-constant err-referral-limit-reached (err u116))
 
 (define-data-var total-users uint u0)
 (define-data-var streak-bonus-multiplier uint u2)
@@ -21,6 +25,9 @@
 (define-data-var total-rewards uint u0)
 (define-data-var contract-active bool true)
 (define-data-var current-day uint u1)
+(define-data-var referrer-bonus uint u50)
+(define-data-var referee-bonus uint u30)
+(define-data-var max-referrals-per-user uint u100)
 
 (define-map users
   { user: principal }
@@ -129,6 +136,24 @@
   {
     actions-completed: uint,
     points-earned: uint
+  }
+)
+
+(define-map referral-data
+  { user: principal }
+  {
+    referrer: (optional principal),
+    total-referrals: uint,
+    referral-points-earned: uint,
+    is-referee: bool
+  }
+)
+
+(define-map user-referrals
+  { referrer: principal, referee: principal }
+  {
+    referral-date: uint,
+    bonus-awarded: bool
   }
 )
 
@@ -712,4 +737,161 @@
     max-streak-bonus: (var-get max-streak-bonus),
     current-day: (get-current-day)
   }
+)
+
+(define-public (register-with-referral (referrer principal))
+  (let
+    (
+      (user tx-sender)
+      (referrer-data (map-get? referral-data { user: referrer }))
+      (referrer-user-data (map-get? users { user: referrer }))
+    )
+    (asserts! (var-get contract-active) (err u999))
+    (asserts! (is-none (map-get? users { user: user })) err-already-exists)
+    (asserts! (not (is-eq user referrer)) err-self-referral)
+    (asserts! (is-some referrer-user-data) err-invalid-referrer)
+    
+    (let
+      (
+        (referrer-ref-data (default-to 
+          { referrer: none, total-referrals: u0, referral-points-earned: u0, is-referee: false }
+          referrer-data
+        ))
+        (current-referrals (get total-referrals referrer-ref-data))
+      )
+      (asserts! (< current-referrals (var-get max-referrals-per-user)) err-referral-limit-reached)
+      
+      (map-set users
+        { user: user }
+        {
+          points: (var-get referee-bonus),
+          total-earned: (var-get referee-bonus),
+          total-redeemed: u0,
+          actions-completed: u0,
+          registration-height: u0
+        }
+      )
+      
+      (map-set user-streaks
+        { user: user }
+        {
+          current-streak: u0,
+          best-streak: u0,
+          last-action-day: u0,
+          total-streak-points: u0,
+          streak-milestones: u0
+        }
+      )
+      
+      (map-set referral-data
+        { user: user }
+        {
+          referrer: (some referrer),
+          total-referrals: u0,
+          referral-points-earned: u0,
+          is-referee: true
+        }
+      )
+      
+      (map-set user-referrals
+        { referrer: referrer, referee: user }
+        {
+          referral-date: (get-current-day),
+          bonus-awarded: true
+        }
+      )
+      
+      (let
+        (
+          (referrer-user (unwrap-panic referrer-user-data))
+          (referrer-bonus-points (var-get referrer-bonus))
+        )
+        (map-set users
+          { user: referrer }
+          {
+            points: (+ (get points referrer-user) referrer-bonus-points),
+            total-earned: (+ (get total-earned referrer-user) referrer-bonus-points),
+            total-redeemed: (get total-redeemed referrer-user),
+            actions-completed: (get actions-completed referrer-user),
+            registration-height: (get registration-height referrer-user)
+          }
+        )
+        
+        (map-set referral-data
+          { user: referrer }
+          {
+            referrer: (get referrer referrer-ref-data),
+            total-referrals: (+ current-referrals u1),
+            referral-points-earned: (+ (get referral-points-earned referrer-ref-data) referrer-bonus-points),
+            is-referee: (get is-referee referrer-ref-data)
+          }
+        )
+      )
+      
+      (var-set total-users (+ (var-get total-users) u1))
+      (ok true)
+    )
+  )
+)
+
+(define-public (update-referral-bonuses (new-referrer-bonus uint) (new-referee-bonus uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> new-referrer-bonus u0) err-invalid-amount)
+    (asserts! (> new-referee-bonus u0) err-invalid-amount)
+    
+    (var-set referrer-bonus new-referrer-bonus)
+    (var-set referee-bonus new-referee-bonus)
+    (ok true)
+  )
+)
+
+(define-public (update-max-referrals (new-max uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> new-max u0) err-invalid-amount)
+    
+    (var-set max-referrals-per-user new-max)
+    (ok new-max)
+  )
+)
+
+(define-read-only (get-referral-data (user principal))
+  (map-get? referral-data { user: user })
+)
+
+(define-read-only (get-referral-relationship (referrer principal) (referee principal))
+  (map-get? user-referrals { referrer: referrer, referee: referee })
+)
+
+(define-read-only (get-referral-stats)
+  {
+    referrer-bonus: (var-get referrer-bonus),
+    referee-bonus: (var-get referee-bonus),
+    max-referrals: (var-get max-referrals-per-user),
+    total-users: (var-get total-users)
+  }
+)
+
+(define-read-only (get-user-referral-impact (user principal))
+  (let
+    (
+      (ref-data (map-get? referral-data { user: user }))
+    )
+    (match ref-data
+      data
+        (ok {
+          total-referrals: (get total-referrals data),
+          referral-points-earned: (get referral-points-earned data),
+          is-referee: (get is-referee data),
+          referrer: (get referrer data)
+        })
+      (ok {
+        total-referrals: u0,
+        referral-points-earned: u0,
+        is-referee: false,
+        referrer: none
+      })
+    )
+  )
 )
