@@ -17,6 +17,43 @@
 (define-constant err-invalid-referrer (err u115))
 (define-constant err-referral-limit-reached (err u116))
 
+(define-map roles
+  { role: (string-ascii 32), member: principal }
+  { active: bool }
+)
+
+(define-public (grant-role (role (string-ascii 32)) (member principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set roles { role: role, member: member } { active: true })
+    (ok true)
+  )
+)
+
+(define-public (revoke-role (role (string-ascii 32)) (member principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set roles { role: role, member: member } { active: false })
+    (ok true)
+  )
+)
+
+(define-read-only (has-role (role (string-ascii 32)) (member principal))
+  (let
+    (
+      (entry (map-get? roles { role: role, member: member }))
+    )
+    (match entry
+      data (get active data)
+      false
+    )
+  )
+)
+
+(define-read-only (is-authorized (role (string-ascii 32)))
+  (or (is-eq tx-sender contract-owner) (has-role role tx-sender))
+)
+
 (define-data-var total-users uint u0)
 (define-data-var streak-bonus-multiplier uint u2)
 (define-data-var max-streak-bonus uint u50)
