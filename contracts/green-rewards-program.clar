@@ -932,3 +932,47 @@
     )
   )
 )
+
+(define-read-only (get-user-progress (user principal))
+  (let
+    (
+      (user-data (map-get? users { user: user }))
+    )
+    (match user-data
+      data
+        (let
+          (
+            (streak-data (default-to 
+              { current-streak: u0, best-streak: u0, last-action-day: u0, total-streak-points: u0, streak-milestones: u0 }
+              (map-get? user-streaks { user: user })
+            ))
+            (day (var-get current-day))
+            (daily-data (default-to
+              { actions-completed: u0, points-earned: u0 }
+              (map-get? daily-action-tracker { user: user, day: day })
+            ))
+            (ref-data (default-to 
+              { referrer: none, total-referrals: u0, referral-points-earned: u0, is-referee: false }
+              (map-get? referral-data { user: user })
+            ))
+          )
+          (ok {
+            points: (get points data),
+            total-earned: (get total-earned data),
+            total-redeemed: (get total-redeemed data),
+            actions-completed: (get actions-completed data),
+            current-streak: (get current-streak streak-data),
+            best-streak: (get best-streak streak-data),
+            total-streak-points: (get total-streak-points streak-data),
+            today-actions: (get actions-completed daily-data),
+            today-points: (get points-earned daily-data),
+            total-referrals: (get total-referrals ref-data),
+            referral-points-earned: (get referral-points-earned ref-data),
+            is-referee: (get is-referee ref-data),
+            referrer: (get referrer ref-data)
+          })
+        )
+      (err err-user-not-registered)
+    )
+  )
+)
